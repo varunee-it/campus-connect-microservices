@@ -1,0 +1,73 @@
+services:
+  # ========================================================
+  # Lab 7: API Gateway (Single Public Entry Point)
+  # ========================================================
+  api-gateway:
+    build: ./api-gateway
+    image: api-gateway:v1
+    container_name: api-gateway
+    ports:
+      - "8000:8000"  # ONLY the API Gateway is exposed externally
+    environment:
+      PORT: 8000
+      USER_SERVICE_URL: ${USER_SERVICE_URL:-http://user-service:3001}
+      PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL:-http://product-service:3002}
+      ORDER_SERVICE_URL: ${ORDER_SERVICE_URL:-http://order-service:3003}
+    depends_on:
+      - user-service
+      - product-service
+      - order-service
+    networks:
+      - campus-network
+
+  # ========================================================
+  # Lab 6 Microservices (Preserved Unchanged, Internal Only)
+  # ========================================================
+  user-service:
+    build: ./user-service
+    image: user-service:v1
+    container_name: user-service
+    expose:
+      - "3001"  # Internal to Docker network only - no host port binding
+    environment:
+      PORT: 3001
+      USER_SERVICE_PORT: 3001
+      MONGO_URI: ${USER_SERVICE_MONGO_URI}
+    networks:
+      - campus-network
+
+  product-service:
+    build: ./product-service
+    image: product-service:v1
+    container_name: product-service
+    expose:
+      - "3002"  # Internal to Docker network only - no host port binding
+    environment:
+      PORT: 3002
+      PRODUCT_SERVICE_PORT: 3002
+      MONGO_URI: ${PRODUCT_SERVICE_MONGO_URI}
+    networks:
+      - campus-network
+
+  order-service:
+    build: ./order-service
+    image: order-service:v1
+    container_name: order-service
+    expose:
+      - "3003"  # Internal to Docker network only - no host port binding
+    environment:
+      PORT: 3003
+      ORDER_SERVICE_PORT: 3003
+      USER_SERVICE_URL: ${ORDER_SERVICE_USER_URL:-http://user-service:3001}
+      PRODUCT_SERVICE_URL: ${ORDER_SERVICE_PRODUCT_URL:-http://product-service:3002}
+      MONGO_URI: ${ORDER_SERVICE_MONGO_URI}
+    depends_on:
+      - user-service
+      - product-service
+    networks:
+      - campus-network
+
+networks:
+  campus-network:
+    name: campus-network
+    driver: bridge
