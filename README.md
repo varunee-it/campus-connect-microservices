@@ -6,6 +6,9 @@
 **Institution**: Dhirubhai Ambani Institute of Information and Communication Technology (DA-IICT)  
 **Student Name**: Varunee Agrawal  
 **Student ID**: 202512067  
+**GitHub Repository**: [https://github.com/varunee-it/campus-connect-microservices](https://github.com/varunee-it/campus-connect-microservices) (Branch: `main`)  
+**Render Blueprint**: `campus-connect-lab7`  
+**Live API Gateway URL**: [https://campusconnect-api-gateway-xg0y.onrender.com](https://campusconnect-api-gateway-xg0y.onrender.com)  
 
 ---
 
@@ -79,7 +82,7 @@ flowchart TD
 ### 3.2 Network Boundaries (Local vs. Cloud)
 
 - **Local Docker Compose**: The API Gateway container publishes port `8000:8000` to the host machine. The User (`3001`), Product (`3002`), and Order (`3003`) services use `expose` to communicate strictly over the internal bridge network `campus-network`. External clients cannot access backend microservices directly.
-- **Cloud (Render)**: In the cloud, the API Gateway is deployed as a public web service with a public URL (`https://campusconnect-api-gateway-h1tk.onrender.com`). Backend microservices are deployed as containerized web services whose locations are injected into the gateway via environment variables.
+- **Cloud (Render)**: In the cloud, the API Gateway is deployed as a public web service with a public URL ([`https://campusconnect-api-gateway-xg0y.onrender.com`](https://campusconnect-api-gateway-xg0y.onrender.com)). Backend microservices are deployed as containerized web services whose locations are injected into the gateway via dynamic Render environment variables.
 
 ---
 
@@ -203,9 +206,13 @@ npm --prefix api-gateway test
 
 ---
 
-### 7.2 Hands-On Failure and Recovery Test
+### 7.2 Hands-On Failure and Recovery Test (Local Docker Verification)
 
-The gateway failure test demonstrates centralized error handling when a backend microservice fails:
+The gateway failure test demonstrates centralized error handling when a backend microservice fails.
+
+> **Verification Environment**: This failure and recovery test procedure was verified in the **local Docker Compose environment** using the Docker CLI to simulate unexpected microservice outages. *(The cloud deployment on Render was verified for live routing and healthy connectivity across all services without disrupting production cloud instances).*
+
+The step-by-step verification procedure:
 
 1. **Step 1 — Start All Services**:
    ```bash
@@ -298,79 +305,196 @@ When running `docker compose ps`, only port `8000` is exposed to the host machin
 - `product-service` -> `3002/tcp` (Internal only)
 - `order-service` -> `3003/tcp` (Internal only)
 
+## 9. Cloud Deployment on Render (Part E)
+
+### 9.1 Render Blueprint & Deployment Metadata
+
+The microservices architecture is containerized and deployed to the **Render Cloud Platform** using Render Blueprints (`render.yaml`):
+
+- **Render Blueprint Name**: `campus-connect-lab7`
+- **GitHub Repository**: [`https://github.com/varunee-it/campus-connect-microservices`](https://github.com/varunee-it/campus-connect-microservices)
+- **Deployment Branch**: `main`
+- **Public API Gateway URL**: [`https://campusconnect-api-gateway-xg0y.onrender.com`](https://campusconnect-api-gateway-xg0y.onrender.com)
+- **Live Endpoint Links**:
+  - `GET /health`: [`https://campusconnect-api-gateway-xg0y.onrender.com/health`](https://campusconnect-api-gateway-xg0y.onrender.com/health)
+  - `GET /users`: [`https://campusconnect-api-gateway-xg0y.onrender.com/users`](https://campusconnect-api-gateway-xg0y.onrender.com/users)
+  - `GET /products`: [`https://campusconnect-api-gateway-xg0y.onrender.com/products`](https://campusconnect-api-gateway-xg0y.onrender.com/products)
+  - `GET /orders`: [`https://campusconnect-api-gateway-xg0y.onrender.com/orders`](https://campusconnect-api-gateway-xg0y.onrender.com/orders)
+
 ---
 
-## 9. Cloud Deployment (Part E)
+### 9.2 The Four Render Microservices & Gateway Routing Architecture
 
-### 9.1 Platform & Live Public Endpoints
+The cloud architecture consists of four distinct web services defined in `render.yaml`:
 
-The complete system is containerized and deployed to **Render Cloud Platform**:
+| Render Service Name | Service Type | Internal Port | Public URL / Internal Host | Role & Responsibilities |
+| :------------------ | :----------- | :------------ | :-------------------------- | :---------------------- |
+| **`campusconnect-api-gateway`** | Web Service (Docker) | `8000` | [`https://campusconnect-api-gateway-xg0y.onrender.com`](https://campusconnect-api-gateway-xg0y.onrender.com) | **Public Entry Point & Reverse Proxy**: Unified ingress for all external clients. Dispatches `/users/*`, `/products/*`, and `/orders/*` to backend microservices, tracks request latency, enforces structured logging, and returns standardized JSON `502 Bad Gateway` / `503 Service Unavailable` responses on backend failures. |
+| **`campusconnect-user-service`** | Web Service (Docker) | `3001` | `https://campusconnect-user-service-03do.onrender.com` | **User Microservice**: Manages user profiles, student registrations, schemas, and queries against MongoDB Atlas (`campus_user_db`). |
+| **`campusconnect-product-service`** | Web Service (Docker) | `3002` | `https://campusconnect-product-service-jodx.onrender.com` | **Product Microservice**: Manages the product catalog, stock inventory, prices, and queries against MongoDB Atlas (`campus_product_db`). |
+| **`campusconnect-order-service`** | Web Service (Docker) | `3003` | `https://campusconnect-order-service-9a8u.onrender.com` | **Order Microservice**: Manages order creation and order lifecycle against MongoDB Atlas (`campus_order_db`). Performs synchronous HTTP verification against User Service and Product Service before completing an order. |
 
-- **Cloud Platform**: Render Cloud (Oregon Region)
-- **Public API Gateway URL**: [`https://campusconnect-api-gateway-h1tk.onrender.com`](https://campusconnect-api-gateway-h1tk.onrender.com)
-- **Deployed Microservices (Internal Layer)**:
-  - User Service: `https://campusconnect-user-service-rxhi.onrender.com`
-  - Product Service: `https://campusconnect-product-service-9g4v.onrender.com`
-  - Order Service: `https://campusconnect-order-service-emsg.onrender.com`
-- **Persistent Database**: MongoDB Atlas Cluster
+#### Service Discovery & Environment-Variable Routing
 
-### 9.2 Live Public Verification
+In Render, dynamic inter-service discovery is managed via environment variables:
 
-You can test the live cloud deployment from any terminal:
+1. In `render.yaml`, the gateway receives backend addresses using `fromService`:
+   ```yaml
+   envVars:
+     - key: USER_SERVICE_URL
+       fromService:
+         type: web
+         name: campusconnect-user-service
+         property: host
+     - key: PRODUCT_SERVICE_URL
+       fromService:
+         type: web
+         name: campusconnect-product-service
+         property: host
+     - key: ORDER_SERVICE_URL
+       fromService:
+         type: web
+         name: campusconnect-order-service
+         property: host
+   ```
+2. Render injects service hostnames (e.g., `campusconnect-user-service-03do`).
+3. The API Gateway (`api-gateway/server.js`) utilizes a built-in `formatUrl()` normalizer:
+   - If an internal Render host slug is supplied, it is automatically formatted to `https://<host>.onrender.com`.
+   - If a full URL or Docker hostname (`http://user-service:3001`) is supplied, it is preserved without modification.
+4. This architecture achieves **true environment parity**: the exact same application code and Docker images run seamlessly in both local Docker Compose and Render Cloud.
 
+---
+
+### 9.3 Deployment Verification & Actual Live Evidence
+
+All four endpoints on the live Render deployment were verified using HTTP requests.
+
+#### 1. Live Gateway Health Check
+
+Request:
 ```bash
-# 1. API Gateway Health Check
-curl.exe -s https://campusconnect-api-gateway-h1tk.onrender.com/health
-
-# 2. User Service via Gateway
-curl.exe -s https://campusconnect-api-gateway-h1tk.onrender.com/users
-
-# 3. Product Service via Gateway
-curl.exe -s https://campusconnect-api-gateway-h1tk.onrender.com/products
-
-# 4. Order Service via Gateway
-curl.exe -s https://campusconnect-api-gateway-h1tk.onrender.com/orders
+curl.exe -s https://campusconnect-api-gateway-xg0y.onrender.com/health
 ```
 
-> **Note on Free-Tier Spin-Down**: Render free web services spin down after 15 minutes of inactivity. If instances are dormant, initial cold boot takes 30-50 seconds before returning `200 OK`. Subsequent calls execute with sub-100ms response times.
+Actual Response (`HTTP 200 OK`):
+```json
+{
+  "service": "api-gateway",
+  "status": "UP",
+  "port": 8000,
+  "timestamp": "2026-10-15T09:43:00.043Z",
+  "serviceRegistry": {
+    "userService": "https://campusconnect-user-service-03do.onrender.com",
+    "productService": "https://campusconnect-product-service-jodx.onrender.com",
+    "orderService": "https://campusconnect-order-service-9a8u.onrender.com"
+  }
+}
+```
+
+*Verification Finding*: The gateway is live, reports `status: "UP"`, and successfully displays the resolved cloud URLs for all three backend microservices in its active service registry.
+
+#### 2. Live Microservice Routing Verification
+
+```bash
+# 1. User Service Route via Gateway
+curl.exe -s https://campusconnect-api-gateway-xg0y.onrender.com/users
+# Output: []
+
+# 2. Product Service Route via Gateway
+curl.exe -s https://campusconnect-api-gateway-xg0y.onrender.com/products
+# Output: []
+
+# 3. Order Service Route via Gateway
+curl.exe -s https://campusconnect-api-gateway-xg0y.onrender.com/orders
+# Output: []
+```
+
+#### Important Verification Notes:
+
+- **Database State (`[]`)**: The empty JSON arrays (`[]`) returned by `/users`, `/products`, and `/orders` confirm that the API Gateway successfully proxied each request to the corresponding backend microservice, and each microservice successfully connected to its designated MongoDB Atlas database collection (`campus_user_db`, `campus_product_db`, `campus_order_db`) returning 0 records. This confirms complete end-to-end routing, container execution, and database connectivity. It does *not* claim that pre-existing database records or mutations were tested in the cloud.
+- **Failure and Recovery Test Scope**: The failure-handling and automatic recovery test procedure (stopping a service to trigger `502 Bad Gateway` and restarting it to restore `200 OK`) was executed and verified **locally in Docker Compose** (documented in Section 7.2). It was *not* executed against the live Render cloud deployment to maintain production availability and avoid intentionally disrupting active cloud services.
 
 ---
 
-## 10. Postman Collection
+## 10. Limitations and Cloud Notes
 
-The repository includes an importable Postman collection at:
+When interacting with the live Render cloud deployment, keep in mind the operational characteristics of Render Free Tier instances:
+
+1. **Free-Tier Inactivity Spin-Down**: Render free web services spin down into a sleep state after 15 minutes of inactivity to preserve compute resources.
+2. **Cold-Start Delay**: If services are dormant, the first incoming request triggers an automated spin-up cycle. The initial request may take **50–120 seconds** while the container initializes, boots Node.js, and establishes a secure TLS connection to MongoDB Atlas.
+3. **Subsequent Low Latency**: Once awakened, the container remains warm, and subsequent requests execute with normal sub-100ms response times.
+4. **Initial Database Collections**: Since the MongoDB Atlas databases were newly initialized for this deployment, GET collections return empty arrays (`[]`) until records are populated via POST requests.
+
+---
+
+## 11. Postman Collection & API Testing
+
+The repository provides a complete, pre-configured Postman collection ready for import:
 
 ```
 postman/Lab7_API_Gateway.postman_collection.json
 ```
 
-### Collection Features:
-- Collection variable `{{baseUrl}}` configured to target either local (`http://localhost:8000`) or cloud (`https://campusconnect-api-gateway-h1tk.onrender.com`).
-- Pre-configured requests with automated test assertions:
-  1. `0. Gateway Health Check`: GET `/health`
-  2. `1. User Service Routes`: GET `/users`, GET `/users/:id`, POST `/users`, PUT `/users/:id`, DELETE `/users/:id`
-  3. `2. Product Service Routes`: GET `/products`, GET `/products/:id`, POST `/products`, PUT `/products/:id`, DELETE `/products/:id`
-  4. `3. Order Service Routes`: GET `/orders`, GET `/orders/:id`, POST `/orders` (with inter-service validation)
-  5. `4. Resilience & Error Handling`: Unreachable service test (asserts 502/503 Bad Gateway) & Recovery test (asserts 200 OK after restart)
+### Environment Switching: Local vs. Cloud
+
+The collection defines a parameterized `{{baseUrl}}` variable, allowing instant switching between environments:
+
+| Environment | Variable Name | URL Value | Usage / Prerequisite |
+| :---------- | :------------ | :-------- | :------------------- |
+| **Local Environment** | `{{baseUrl}}` | `http://localhost:8000` | Requires `docker compose up -d` running locally. |
+| **Public Cloud (Render)** | `{{baseUrl}}` | `https://campusconnect-api-gateway-xg0y.onrender.com` | Directly callable over the public internet. |
+
+> **Note**: Microservice ports (`3001`, `3002`, `3003`) are internal only and cannot be accessed directly by clients. All requests must target the API Gateway (`8000` locally, or the public Render URL in the cloud).
+
+### Included Requests & Assertions:
+
+1. **`0. Gateway Health Check`**: `GET /health` — Asserts `200 OK`, `status === "UP"`, and service registry presence.
+2. **`1. User Service Routes`**:
+   - `GET /users`: List users (asserts `200 OK`).
+   - `GET /users/:id`: Get single user (asserts `200 OK`).
+   - `POST /users`: Create user (asserts `201 Created` with created user ID).
+   - `PUT /users/:id`: Update user (asserts `200 OK`).
+   - `DELETE /users/:id`: Delete user (asserts `200 OK`).
+3. **`2. Product Service Routes`**:
+   - `GET /products`: List products (asserts `200 OK`).
+   - `GET /products/:id`: Get single product (asserts `200 OK`).
+   - `POST /products`: Create product item (asserts `201 Created`).
+   - `PUT /products/:id`: Update product item (asserts `200 OK`).
+   - `DELETE /products/:id`: Delete product item (asserts `200 OK`).
+4. **`3. Order Service Routes`**:
+   - `GET /orders`: List orders (asserts `200 OK`).
+   - `GET /orders/:id`: Get single order (asserts `200 OK`).
+   - `POST /orders`: Place order with inter-service validation (asserts `201 Created`).
+5. **`4. Resilience & Error Handling`**:
+   - Service Unreachable Test: Asserts `502 Bad Gateway` or `503 Service Unavailable` with structured JSON error payload.
+   - Service Recovery Test: Asserts `200 OK` after service restoration.
 
 ---
 
-## 11. Security Best Practices
+## 12. Security Best Practices
 
-1. **Zero Committed Secrets**: `.env` is registered in `.gitignore`. MongoDB Atlas credentials and secrets are injected via local environment variables or Render Cloud secret managers.
-2. **Private Network Shielding**: Microservices do not expose ports to the outside world; only the gateway accepts incoming traffic.
-3. **Bounded Timeouts**: Gateway proxy calls have strict bounded timeouts (`PROXY_TIMEOUT_MS=5000`) to prevent hung connections.
-4. **Sanitized Logging**: The gateway logs request method, URL, status code, and latency, but suppresses sensitive authorization headers, credentials, and payload secrets.
+1. **Zero Committed Secrets**: `.env` is ignored by Git via `.gitignore`. Real credentials, database passwords, and connection strings are never committed to version control.
+2. **Safe Placeholder Templates**: `.env.example` contains only sanitized dummy placeholders:
+   ```env
+   USER_SERVICE_MONGO_URI=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/campus_user_db?retryWrites=true&w=majority
+   PRODUCT_SERVICE_MONGO_URI=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/campus_product_db?retryWrites=true&w=majority
+   ORDER_SERVICE_MONGO_URI=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/campus_order_db?retryWrites=true&w=majority
+   ```
+3. **Container Network Isolation**: In Docker Compose, microservice ports (`3001`, `3002`, `3003`) are declared using `expose` rather than `ports`. Only the API Gateway (`8000:8000`) is accessible from the host.
+4. **Bounded Proxy Timeouts**: The gateway enforces bounded proxy timeouts (`PROXY_TIMEOUT_MS=5000`) to prevent client requests from hanging indefinitely if a backend service stalls.
+5. **Sanitized Observability Logging**: Gateway request logging captures HTTP method, URL, status code, and latency, while suppressing sensitive authorization headers, bearer tokens, and credentials.
 
 ---
 
-## 12. Written Reflection (Lab 6 vs. Lab 7)
+## 13. Written Reflection (Lab 6 vs. Lab 7)
 
 Introducing the API Gateway and cloud deployment fundamentally transformed how the CampusConnect system operates compared to Lab 6. In Lab 6, clients acted as distributed orchestrators, juggling disparate port numbers, internal hostnames, and unhandled network drops. With Lab 7, clients interact solely through a unified ingress gateway that conceals internal topology, shields microservices inside a private network, and standardizes cross-cutting logging and 502/503 error handling. Furthermore, replacing hard-coded service URLs with configuration-based service discovery enables seamless promotion between local Docker environments and cloud hosting without modifying a single line of application source code.
 
 ---
 
-## 13. Verification Screenshots & Evidence Checklist
+## 14. Verification Screenshots & Evidence Checklist
+
+The `Screenshots/` directory contains 13 verified image captures documenting the implementation, local execution, and cloud deployment:
 
 | Screenshot | File Path | Verified Item |
 | :--- | :--- | :--- |
@@ -387,3 +511,4 @@ Introducing the API Gateway and cloud deployment fundamentally transformed how t
 | **11** | `Screenshots/11-service-discovery-config.png` | Configuration change demonstration without code changes |
 | **12** | `Screenshots/12-cloud-deployment-dashboard.png` | Render Cloud deployment dashboard showing healthy services |
 | **13** | `Screenshots/13-postman-cloud-tests.png` | Live Postman requests executing against public gateway URL |
+
