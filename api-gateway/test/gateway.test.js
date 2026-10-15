@@ -176,4 +176,15 @@ describe('Lab 7 API Gateway & Service Discovery Test Suite', () => {
         const recoveredData = await recoveredRes.json();
         assert.equal(recoveredData.status, 'recovered');
     });
+
+    // Test 8: Prometheus Metrics Endpoint (Lab 8)
+    test('8. GET /metrics returns Prometheus formatted metrics with http_requests_total', async () => {
+        const res = await fetch(`${gatewayUrl}/metrics`);
+        assert.equal(res.status, 200);
+        const text = await res.text();
+        assert.ok(text.includes('http_requests_total'), 'Metrics should include http_requests_total');
+        assert.ok(text.includes('http_request_duration_seconds'), 'Metrics should include http_request_duration_seconds');
+        assert.ok(text.includes('campus_gateway_'), 'Metrics should include process default metrics');
+    });
 });
+

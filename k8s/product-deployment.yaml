@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  namespace: lab8
+  labels:
+    app: product-service
+    app.kubernetes.io/name: product-service
+    app.kubernetes.io/part-of: campus-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: product-service
+  template:
+    metadata:
+      labels:
+        app: product-service
+        app.kubernetes.io/name: product-service
+    spec:
+      containers:
+        - name: product-service
+          image: product-service:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3002
+              name: http
+          env:
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: campus-config
+                  key: PRODUCT_PORT
+            - name: PRODUCT_SERVICE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: campus-config
+                  key: PRODUCT_PORT
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: campus-secrets
+                  key: PRODUCT_SERVICE_MONGO_URI
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3002
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3002
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2

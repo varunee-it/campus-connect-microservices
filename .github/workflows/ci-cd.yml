@@ -1,0 +1,162 @@
+name: CampusConnect CI/CD (Lab 8)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ========================================================
+  # Stage 1: Continuous Integration - Automated Test Suite
+  # ========================================================
+  test:
+    name: Run Automated Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 Runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: api-gateway/package-lock.json
+
+      - name: Install API Gateway Dependencies
+        run: |
+          cd api-gateway
+          npm ci
+
+      - name: Execute Automated Test Suite (Gateway & Metrics)
+        run: |
+          cd api-gateway
+          npm test
+
+  # ========================================================
+  # Stage 2: Continuous Delivery - Build & Push Docker Images
+  # ========================================================
+  build-and-push:
+    name: Build & Publish Container Images
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: api-gateway
+            context: ./api-gateway
+          - name: user-service
+            context: ./user-service
+          - name: product-service
+            context: ./product-service
+          - name: order-service
+            context: ./order-service
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase Repository Owner for GHCR Tags
+        id: repo-owner
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
+
+      - name: Extract Docker Metadata & Version Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.repo-owner.outputs.owner }}/${{ matrix.service.name }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and Push Versioned Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service.context }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ========================================================
+  # Stage 3: Continuous Deployment - Kubernetes Rollout (Guarded)
+  # ========================================================
+  deploy-k8s:
+    name: Deploy to Kubernetes Cluster
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Verify Kubernetes Target Credentials
+        id: check-creds
+        run: |
+          if [ -z "${{ secrets.KUBECONFIG_DATA }}" ]; then
+            echo "::notice title=CD Blocked::Secret KUBECONFIG_DATA is not configured in repository secrets. Skipping automated Kubernetes rollout. Container images were successfully published to GHCR."
+            echo "has_cluster=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_cluster=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up kubectl
+        if: steps.check-creds.outputs.has_cluster == 'true'
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+
+      - name: Configure Kubeconfig & Deploy
+        if: steps.check-creds.outputs.has_cluster == 'true'
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DATA }}
+          IMAGE_TAG: ${{ github.sha }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          mkdir -p ~/.kube
+          echo "$KUBECONFIG_DATA" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml -n lab8
+
+          # Update image references to versioned GHCR tags
+          sed -i "s|image: api-gateway:v1|image: ghcr.io/${OWNER,,}/api-gateway:${IMAGE_TAG}|g" k8s/gateway-deployment.yaml
+          sed -i "s|image: user-service:v1|image: ghcr.io/${OWNER,,}/user-service:${IMAGE_TAG}|g" k8s/user-deployment.yaml
+          sed -i "s|image: product-service:v1|image: ghcr.io/${OWNER,,}/product-service:${IMAGE_TAG}|g" k8s/product-deployment.yaml
+          sed -i "s|image: order-service:v1|image: ghcr.io/${OWNER,,}/order-service:${IMAGE_TAG}|g" k8s/order-deployment.yaml
+
+          kubectl apply -f k8s/gateway-deployment.yaml -n lab8
+          kubectl apply -f k8s/gateway-service.yaml -n lab8
+          kubectl apply -f k8s/user-deployment.yaml -n lab8
+          kubectl apply -f k8s/user-service.yaml -n lab8
+          kubectl apply -f k8s/product-deployment.yaml -n lab8
+          kubectl apply -f k8s/product-service.yaml -n lab8
+          kubectl apply -f k8s/order-deployment.yaml -n lab8
+          kubectl apply -f k8s/order-service.yaml -n lab8
+
+          echo "Verifying deployment rollouts..."
+          kubectl rollout status deployment/api-gateway -n lab8 --timeout=180s
+          kubectl rollout status deployment/user-service -n lab8 --timeout=180s
+          kubectl rollout status deployment/product-service -n lab8 --timeout=180s
+          kubectl rollout status deployment/order-service -n lab8 --timeout=180s

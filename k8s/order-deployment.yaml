@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: lab8
+  labels:
+    app: order-service
+    app.kubernetes.io/name: order-service
+    app.kubernetes.io/part-of: campus-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+        app.kubernetes.io/name: order-service
+    spec:
+      containers:
+        - name: order-service
+          image: order-service:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3003
+              name: http
+          env:
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: campus-config
+                  key: ORDER_PORT
+            - name: ORDER_SERVICE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: campus-config
+                  key: ORDER_PORT
+            - name: USER_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: campus-config
+                  key: USER_SERVICE_URL
+            - name: PRODUCT_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: campus-config
+                  key: PRODUCT_SERVICE_URL
+            - name: HTTP_TIMEOUT_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: campus-config
+                  key: HTTP_TIMEOUT_MS
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: campus-secrets
+                  key: ORDER_SERVICE_MONGO_URI
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3003
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3003
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2

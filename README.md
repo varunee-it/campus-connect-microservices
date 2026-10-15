@@ -512,3 +512,295 @@ The `Screenshots/` directory contains 13 verified image captures documenting the
 | **12** | `Screenshots/12-cloud-deployment-dashboard.png` | Render Cloud deployment dashboard showing healthy services |
 | **13** | `Screenshots/13-postman-cloud-tests.png` | Live Postman requests executing against public gateway URL |
 
+---
+
+# Web Services and SOA — Laboratory 8
+
+## Kubernetes Orchestration, GitHub Actions CI/CD & Prometheus/Grafana Monitoring
+
+**Primary Goal**: Operationalize the Lab 7 CampusConnect microservices architecture on Kubernetes (`lab8` namespace), automate test validation and versioned container image publishing via GitHub Actions CI/CD to GitHub Container Registry (GHCR), and establish real-time observability using Prometheus and Grafana.
+
+---
+
+### 15.1 System Architecture & Kubernetes Topology
+
+```mermaid
+flowchart TD
+    Client["Client / Postman\n(Host Port 30080 or port-forward 8000)"]
+    
+    subgraph K8sCluster ["Kubernetes Cluster (Namespace: lab8)"]
+        subgraph IngressLayer ["Ingress & Gateway Layer"]
+            GatewaySvc["Service: api-gateway\n(NodePort: 30080 / Port: 8000)"]
+            GatewayPod["Deployment: api-gateway (1 Replica)\n• Reverse Proxy & Routing\n• GET /health\n• GET /metrics (prom-client)"]
+            GatewaySvc --> GatewayPod
+        end
+
+        subgraph CoreServices ["Backend Microservices (Internal ClusterIP)"]
+            UserSvc["Service: user-service (Port: 3001)"]
+            UserPods["Deployment: user-service\n(Replicas: 1 to 3 scaled)"]
+            UserSvc --> UserPods
+
+            ProductSvc["Service: product-service (Port: 3002)"]
+            ProductPods["Deployment: product-service (1 Replica)"]
+            ProductSvc --> ProductPods
+
+            OrderSvc["Service: order-service (Port: 3003)"]
+            OrderPods["Deployment: order-service (1 Replica)"]
+            OrderSvc --> OrderPods
+
+            OrderPods -->|HTTP CoreDNS: http://user-service:3001| UserSvc
+            OrderPods -->|HTTP CoreDNS: http://product-service:3002| ProductSvc
+        end
+
+        subgraph MonitoringLayer ["Observability Stack (Prometheus & Grafana)"]
+            PromSvc["Service: prometheus (NodePort: 30090 / Port: 9090)"]
+            PromPod["Deployment: prometheus\n• Scrapes api-gateway:8000/metrics (5s)"]
+            PromSvc --> PromPod
+
+            GrafSvc["Service: grafana (NodePort: 30030 / Port: 3000)"]
+            GrafPod["Deployment: grafana\n• Pre-configured Prometheus Datasource\n• Lab 8 Monitoring Dashboard"]
+            GrafSvc --> GrafPod
+
+            PromPod -.->|Scrape /metrics| GatewayPod
+            GrafPod -.->|PromQL Queries| PromSvc
+        end
+
+        GatewayPod -->|/users/* via CoreDNS| UserSvc
+        GatewayPod -->|/products/* via CoreDNS| ProductSvc
+        GatewayPod -->|/orders/* via CoreDNS| OrderSvc
+
+        ConfigMap["ConfigMap: campus-config\n(Ports, Service URLs, Timeouts)"]
+        Secrets["Secret: campus-secrets\n(MongoDB Atlas URIs)"]
+        ConfigMap -.-> GatewayPod
+        ConfigMap -.-> UserPods
+        ConfigMap -.-> ProductPods
+        ConfigMap -.-> OrderPods
+        Secrets -.-> UserPods
+        Secrets -.-> ProductPods
+        Secrets -.-> OrderPods
+    end
+
+    subgraph ExternalDB ["Managed Database (Cloud)"]
+        AtlasUserDB[("MongoDB Atlas: campus_user_db")]
+        AtlasProdDB[("MongoDB Atlas: campus_product_db")]
+        AtlasOrderDB[("MongoDB Atlas: campus_order_db")]
+    end
+
+    Client -->|HTTP Request| GatewaySvc
+    UserPods -->|TLS Connection| AtlasUserDB
+    ProductPods -->|TLS Connection| AtlasProdDB
+    OrderPods -->|TLS Connection| AtlasOrderDB
+```
+
+---
+
+### 15.2 Kubernetes Environment & Prerequisites
+
+1. **Kubernetes Environment**: Docker Desktop Kubernetes (local single-node cluster) or Minikube.
+2. **Context & Node Verification**:
+   ```bash
+   kubectl config current-context
+   kubectl get nodes
+   ```
+3. **Namespace Setup**:
+   All Lab 8 resources are strictly isolated within the `lab8` namespace:
+   ```bash
+   kubectl apply -f k8s/namespace.yaml
+   # Or: kubectl create namespace lab8
+   ```
+
+---
+
+### 15.3 Kubernetes Manifests Structure (`k8s/`)
+
+| Manifest | Kind | Purpose |
+| :--- | :--- | :--- |
+| [`k8s/namespace.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/namespace.yaml) | `Namespace` | Defines `lab8` isolation namespace |
+| [`k8s/configmap.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/configmap.yaml) | `ConfigMap` | Non-sensitive configurations (`GATEWAY_PORT`, service URLs, timeouts) |
+| [`k8s/secret.yaml.example`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/secret.yaml.example) | `Secret` | Sanitized template for MongoDB Atlas credentials (version controlled) |
+| `k8s/secret.yaml` | `Secret` | Sensitive Atlas URIs loaded into `campus-secrets` (ignored by `.gitignore`) |
+| [`k8s/gateway-deployment.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/gateway-deployment.yaml) | `Deployment` | 1 replica of `api-gateway:v1`, liveness/readiness probes, resource limits |
+| [`k8s/gateway-service.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/gateway-service.yaml) | `Service` | NodePort service exposing gateway on port 8000 (NodePort 30080) |
+| [`k8s/user-deployment.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/user-deployment.yaml) | `Deployment` | User microservice deployment with probes and DB secret mapping |
+| [`k8s/user-service.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/user-service.yaml) | `Service` | Internal ClusterIP service on port 3001 |
+| [`k8s/product-deployment.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/product-deployment.yaml) | `Deployment` | Product microservice deployment with probes and DB secret mapping |
+| [`k8s/product-service.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/product-service.yaml) | `Service` | Internal ClusterIP service on port 3002 |
+| [`k8s/order-deployment.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/order-deployment.yaml) | `Deployment` | Order service deployment configured with CoreDNS dependent service targets |
+| [`k8s/order-service.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/order-service.yaml) | `Service` | Internal ClusterIP service on port 3003 |
+| [`k8s/prometheus.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/prometheus.yaml) | `Deployment` + `Svc` + `CM` | Prometheus v2.54.1 configured to scrape `api-gateway:8000/metrics` every 5s |
+| [`k8s/grafana.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/grafana.yaml) | `Deployment` + `Svc` + `CM` | Grafana 11.2.0 with auto-provisioned Prometheus datasource |
+| [`k8s/grafana-dashboard.json`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/grafana-dashboard.json) | Dashboard JSON | Complete visual dashboard with latency, request rate, availability, and errors |
+
+---
+
+### 15.4 Deployment & Verification Procedures
+
+1. **Apply Manifests**:
+   ```bash
+   # Create namespace and base configuration
+   kubectl apply -f k8s/namespace.yaml
+   kubectl apply -f k8s/configmap.yaml -n lab8
+   kubectl apply -f k8s/secret.yaml -n lab8
+
+   # Deploy microservices and gateway
+   kubectl apply -f k8s/user-deployment.yaml -n lab8
+   kubectl apply -f k8s/user-service.yaml -n lab8
+   kubectl apply -f k8s/product-deployment.yaml -n lab8
+   kubectl apply -f k8s/product-service.yaml -n lab8
+   kubectl apply -f k8s/order-deployment.yaml -n lab8
+   kubectl apply -f k8s/order-service.yaml -n lab8
+   kubectl apply -f k8s/gateway-deployment.yaml -n lab8
+   kubectl apply -f k8s/gateway-service.yaml -n lab8
+
+   # Deploy monitoring stack
+   kubectl apply -f k8s/prometheus.yaml -n lab8
+   kubectl apply -f k8s/grafana.yaml -n lab8
+   ```
+
+2. **Inspect Running Workloads**:
+   ```bash
+   kubectl get deployments -n lab8
+   kubectl get pods -n lab8 -o wide
+   kubectl get services -n lab8
+   kubectl get endpoints -n lab8
+   ```
+
+3. **Verify Health & Readiness Probes**:
+   All Deployments include HTTP health probes against their existing `/health` endpoints:
+   ```yaml
+   livenessProbe:
+     httpGet:
+       path: /health
+       port: <containerPort>
+     initialDelaySeconds: 10
+     periodSeconds: 10
+   readinessProbe:
+     httpGet:
+       path: /health
+       port: <containerPort>
+     initialDelaySeconds: 5
+     periodSeconds: 5
+   ```
+   Verify Pod readiness:
+   ```bash
+   kubectl describe pod -l app=api-gateway -n lab8 | grep -A 5 "Probes"
+   ```
+
+---
+
+### 15.5 Accessing & Testing the Kubernetes Gateway
+
+The API Gateway is the **only client-facing entry point**. Microservices (`user-service`, `product-service`, `order-service`) use internal `ClusterIP` services and are not directly exposed.
+
+- **Option A: NodePort Access**:
+  ```bash
+  # Access gateway at:
+  http://localhost:30080/health
+  http://localhost:30080/users
+  http://localhost:30080/products
+  http://localhost:30080/orders
+  ```
+- **Option B: Port-Forwarding**:
+  ```bash
+  kubectl port-forward svc/api-gateway 8000:8000 -n lab8
+  # Then query http://localhost:8000/...
+  ```
+
+---
+
+### 15.6 Scaling and Self-Healing Demonstrations
+
+#### Demonstration 1: Scaling User Service to 3 Replicas
+```bash
+# Check current replica count (1 replica)
+kubectl get deployment user-service -n lab8
+
+# Scale deployment to 3 replicas
+kubectl scale deployment user-service --replicas=3 -n lab8
+
+# Verify all 3 Pods reach 'Running' and 'Ready' state
+kubectl get pods -l app=user-service -n lab8
+
+# Verify Kubernetes Service endpoints load-balance across all 3 Pod IPs
+kubectl get endpoints user-service -n lab8
+```
+
+#### Demonstration 2: Self-Healing Pod Replacement
+```bash
+# 1. List user-service pods
+kubectl get pods -l app=user-service -n lab8
+
+# 2. Select and delete one pod
+kubectl delete pod <user-service-pod-name> -n lab8
+
+# 3. Immediately inspect pods to observe Kubernetes ReplicaSet spawning a new pod
+kubectl get pods -l app=user-service -n lab8
+
+# 4. Confirm new pod achieves 1/1 Ready and Running status
+```
+
+---
+
+### 15.7 GitHub Actions CI/CD Pipeline
+
+The workflow [`ci-cd.yml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/.github/workflows/ci-cd.yml) automates continuous integration and delivery:
+
+1. **Stage 1 (Test)**: Runs on `ubuntu-latest`, executes Node.js native test runner in `api-gateway` verifying routing, service discovery, error handling, and `/metrics`.
+2. **Stage 2 (Build & Publish)**: Builds Docker images for all 4 microservices using `docker/build-push-action@v6`. Tags each image with the exact Git commit SHA (`${{ github.sha }}`) and `latest`. Pushes versioned artifacts to **GitHub Container Registry (GHCR)**:
+   - `ghcr.io/varunee-it/api-gateway:<commit-sha>`
+   - `ghcr.io/varunee-it/user-service:<commit-sha>`
+   - `ghcr.io/varunee-it/product-service:<commit-sha>`
+   - `ghcr.io/varunee-it/order-service:<commit-sha>`
+3. **Stage 3 (Guarded K8s Rollout)**: If repository secret `KUBECONFIG_DATA` is configured, automatically deploys the versioned images to the target Kubernetes cluster and validates rollout with `kubectl rollout status`.
+
+**Required GitHub Secrets & Variables**:
+- `GITHUB_TOKEN`: Built-in token used automatically for GHCR authentication (least privilege: `packages: write`).
+- `KUBECONFIG_DATA` *(Optional for automated remote cluster CD)*: Base64-encoded `~/.kube/config` file.
+
+---
+
+### 15.8 Prometheus & Grafana Monitoring
+
+#### Prometheus Setup & Targets
+Prometheus is configured via ConfigMap [`k8s/prometheus.yaml`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/prometheus.yaml) to scrape the API Gateway `/metrics` endpoint every 5 seconds.
+- **Access Prometheus UI**:
+  - NodePort: `http://localhost:30090`
+  - Port-forward: `kubectl port-forward svc/prometheus 9090:9090 -n lab8` -> `http://localhost:9090`
+- **Verify Targets**: Navigate to `Status` -> `Targets`. Both `prometheus` and `api-gateway` report status `UP (1/1)`.
+
+#### PromQL Metric Queries
+| Monitoring Question | PromQL Query | Description |
+| :--- | :--- | :--- |
+| **Availability** | `up{job="api-gateway"}` | Returns `1` if gateway is healthy and scrape succeeds |
+| **Traffic / Request Rate** | `sum(rate(http_requests_total[1m])) by (route)` | Ingress requests per second per API route |
+| **Error Rate** | `sum(rate(http_requests_total{status_code=~"5.."}[5m]))` | Frequency of 5xx server errors |
+| **Status Breakdown** | `sum(http_requests_total) by (status_code)` | Total request volume grouped by HTTP status (200, 201, 404, 502) |
+| **Request Latency (p95)** | `histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))` | 95th percentile latency in seconds |
+
+#### Grafana Dashboard
+- **Access Grafana**:
+  - NodePort: `http://localhost:30030`
+  - Port-forward: `kubectl port-forward svc/grafana 3000:3000 -n lab8` -> `http://localhost:3000`
+  - Default credentials: `admin` / `admin`
+- **Pre-provisioned Datasource**: Automatically connected to `http://prometheus:9090`.
+- **Import Dashboard**: Import [`k8s/grafana-dashboard.json`](file:///d:/DAU%20Material/Sem-3/JayPrakash%20Lalchandani/Lab/Lab-8-varunee/k8s/grafana-dashboard.json) to visualize real-time panels for availability, request rate, HTTP status codes, and latency percentiles.
+
+---
+
+### 15.9 Lab 8 Deliverables & Evidence Mapping
+
+| Item # | Required Evidence | What to Show | Verified Status |
+| :--- | :--- | :--- | :--- |
+| **1** | Lab 7 Baseline | Successful gateway request/response (`/health`, `/users`, `/products`, `/orders`) | Verified |
+| **2** | Kubernetes Environment | Current context + node(s) (`kubectl config current-context`, `kubectl get nodes`) | Ready to verify on cluster start |
+| **3** | Manifests | Gateway, service, and configuration YAML files in `k8s/` | Implemented |
+| **4** | Deployment | Pods, Deployments, and Services in `lab8` namespace | Implemented & Ready |
+| **5** | Gateway Test | Successful Postman/curl request through Kubernetes gateway | Ready to verify on cluster start |
+| **6** | Scaling | User Service scaled to 3 replicas (`kubectl scale deployment user-service --replicas=3 -n lab8`) | Documented & Command Ready |
+| **7** | Self-Healing | Deleted Pod followed by automatic replacement restoration | Documented & Command Ready |
+| **8** | Troubleshooting | Useful `describe`, `logs`, and `endpoints` output | Documented & Command Ready |
+| **9** | GitHub Actions | Successful CI/CD workflow run with automated tests and versioned Docker build | Implemented in `.github/workflows/ci-cd.yml` |
+| **10** | Prometheus | Targets page showing `UP` state and valid PromQL query execution | Implemented in `k8s/prometheus.yaml` |
+| **11** | Grafana | Monitoring dashboard with availability, traffic, errors, and latency | Implemented in `k8s/grafana.yaml` & JSON |
+| **12** | Traffic Monitoring | Observability changes before and after API traffic generation | Fully instrumented via `prom-client` |
+| **13** | Architecture | End-to-end Kubernetes architecture diagram (Mermaid) | Documented in Section 15.1 |

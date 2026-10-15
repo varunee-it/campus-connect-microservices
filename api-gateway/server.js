@@ -6,6 +6,38 @@ require('dotenv').config({
 const express = require('express');
 const cors = require('cors');
 const { createProxyMiddleware, fixRequestBody } = require('http-proxy-middleware');
+const client = require('prom-client');
+
+// Initialize Prometheus registry and metrics
+const register = client.register;
+if (!register.getSingleMetric('campus_gateway_process_cpu_user_seconds_total')) {
+    client.collectDefaultMetrics({ prefix: 'campus_gateway_' });
+}
+
+const getOrCreateCounter = (name, help, labelNames) => {
+    const existing = register.getSingleMetric(name);
+    if (existing) return existing;
+    return new client.Counter({ name, help, labelNames });
+};
+
+const getOrCreateHistogram = (name, help, labelNames, buckets) => {
+    const existing = register.getSingleMetric(name);
+    if (existing) return existing;
+    return new client.Histogram({ name, help, labelNames, buckets });
+};
+
+const httpRequestCounter = getOrCreateCounter(
+    'http_requests_total',
+    'Total number of HTTP requests processed by the API Gateway',
+    ['method', 'route', 'status_code']
+);
+
+const httpRequestDuration = getOrCreateHistogram(
+    'http_request_duration_seconds',
+    'Duration of HTTP requests in seconds through the API Gateway',
+    ['method', 'route', 'status_code'],
+    [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]
+);
 
 const app = express();
 
@@ -58,9 +90,26 @@ const validateServiceConfig = () => {
 // Global CORS Middleware (Configurable for web/browser clients)
 app.use(cors());
 
-// Request timestamp tracking for latency calculation
+// Request timestamp tracking for latency calculation and Prometheus metrics
 app.use((req, res, next) => {
     req._startTime = Date.now();
+    res.on('finish', () => {
+        if (req.path === '/metrics') return;
+        const durationSeconds = (Date.now() - req._startTime) / 1000;
+        let route = req.baseUrl || req.path || 'unknown';
+        if (route.startsWith('/users/')) route = '/users/:id';
+        else if (route.startsWith('/products/')) route = '/products/:id';
+        else if (route.startsWith('/orders/')) route = '/orders/:id';
+        else if (route.startsWith('/students/')) route = '/students/:id';
+
+        const labels = {
+            method: req.method,
+            route: route,
+            status_code: res.statusCode ? res.statusCode.toString() : 'unknown'
+        };
+        httpRequestCounter.inc(labels);
+        httpRequestDuration.observe(labels, durationSeconds);
+    });
     next();
 });
 
@@ -79,6 +128,18 @@ app.get('/health', (req, res) => {
             orderService: ORDER_SERVICE_URL
         }
     });
+});
+
+// ==========================================
+// Part C: Prometheus Metrics Endpoint
+// ==========================================
+app.get('/metrics', async (req, res) => {
+    try {
+        res.set('Content-Type', register.contentType);
+        res.end(await register.metrics());
+    } catch (ex) {
+        res.status(500).end(ex.message);
+    }
 });
 
 // ==========================================
@@ -159,6 +220,7 @@ app.use((req, res) => {
         message: `Route ${req.method} ${req.originalUrl} is not registered on this API Gateway`,
         availableEndpoints: [
             'GET /health',
+            'GET /metrics',
             '/users (GET, POST, /users/{id}: GET, PUT, DELETE)',
             '/products (GET, POST, /products/{id}: GET, PUT, DELETE)',
             '/orders (GET, POST, /orders/{id}: GET)'
@@ -173,10 +235,11 @@ if (require.main === module) {
     validateServiceConfig();
     app.listen(PORT, () => {
         console.log('='.repeat(65));
-        console.log(`  CAMPUSCONNECT API GATEWAY (LAB 7)`);
+        console.log(`  CAMPUSCONNECT API GATEWAY (LAB 7 & LAB 8)`);
         console.log('='.repeat(65));
         console.log(`  Gateway running on port:        ${PORT}`);
         console.log(`  Health Check URL:               http://localhost:${PORT}/health`);
+        console.log(`  Prometheus Metrics URL:         http://localhost:${PORT}/metrics`);
         console.log(`  Configuration Service Registry:`);
         console.log(`    - User Service:               ${USER_SERVICE_URL}`);
         console.log(`    - Product Service:            ${PRODUCT_SERVICE_URL}`);
